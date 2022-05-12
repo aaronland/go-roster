@@ -1,16 +1,3 @@
-# go-roster
-
-Go package provides interfaces and methods for defining internal lookup tables (or "rosters") for registering and instantiatinge custom interfaces with multiple implementations.
-
-## Documentation
-
-[![Go Reference](https://pkg.go.dev/badge/github.com/aaronland/go-roster.svg)](https://pkg.go.dev/github.com/aaronland/go-roster)
-
-## Example
-
-The following example is the body of the [roster_test.go](roster_test.go) file:
-
-```
 package roster
 
 import (
@@ -121,9 +108,3 @@ func TestRoster(t *testing.T) {
 		t.Fatalf("Unexpected result: '%s'", v)
 	}
 }
-```
-
-## Concrete examples
-
-* https://github.com/whosonfirst/go-reader
-* https://github.com/whosonfirst/go-writer
