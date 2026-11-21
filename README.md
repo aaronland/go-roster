@@ -4,124 +4,92 @@ Go package provides interfaces and methods for defining internal lookup tables (
 
 ## Documentation
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/aaronland/go-roster.svg)](https://pkg.go.dev/github.com/aaronland/go-roster)
+[![Go Reference](https://pkg.go.dev/badge/github.com/aaronland/go-roster/v2.svg)](https://pkg.go.dev/github.com/aaronland/go-roster/v2)
 
-## Example
+## Example (v2, generics)
 
-The following example is the body of the [roster_test.go](roster_test.go) file:
+Define an interface and a registry for it. This is the only boilerplate a consuming package needs:
 
 ```
-package roster
+package greeter
 
 import (
 	"context"
-	"fmt"
-	"net/url"
-	"testing"
+
+	"github.com/aaronland/go-roster/v2"
 )
 
-// Create a toy interface that might have multiple implementations including a common
-// method signature for creating instantiations of that interface.
-
-type Example interface {
-	String() string
+type Greeter interface {
+	Greet() string
 }
 
-type ExampleInitializationFunc func(context.Context, string) (Example, error)
+var registry, _ = roster.NewRegistry[Greeter]()
 
-func RegisterExample(ctx context.Context, scheme string, init_func ExampleInitializationFunc) error {
-	return example_roster.Register(ctx, scheme, init_func)
+// GreeterInitializationFunc is an alias, so implementations can use either name.
+type GreeterInitializationFunc = roster.Factory[Greeter]
+
+func RegisterGreeter(ctx context.Context, scheme string, f GreeterInitializationFunc) error {
+	return registry.Register(ctx, scheme, f)
 }
 
-func NewExample(ctx context.Context, uri string) (Example, error) {
-
-	u, err := url.Parse(uri)
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse URI, %w", err)
-	}
-
-	scheme := u.Scheme
-
-	i, err := example_roster.Driver(ctx, scheme)
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to find registeration for %s, %w", scheme, err)
-	}
-
-	init_func := i.(ExampleInitializationFunc)
-	return init_func(ctx, uri)
+func NewGreeter(ctx context.Context, uri string) (Greeter, error) {
+	return registry.New(ctx, uri)
 }
 
-// Something that implements the Example interface
-
-type StringExample struct {
-	Example
-	value string
-}
-
-func NewStringExample(ctx context.Context, uri string) (Example, error) {
-
-	u, err := url.Parse(uri)
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse URL, %w", err)
-	}
-
-	s := &StringExample{
-		value: u.Path,
-	}
-
-	return s, nil
-}
-
-func (e *StringExample) String() string {
-	return e.value
-}
-
-// Create a global "roster" of implementations of the Example interface
-
-var example_roster Roster
-
-// Ensure that there is a valid roster (for use by the code handling the Example interface)
-// and register the StringExample implementation
-
-func init() {
-
-	ctx := context.Background()
-
-	r, err := NewDefaultRoster()
-
-	if err != nil {
-		panic(err)
-	}
-
-	example_roster = r
-
-	err = RegisterExample(ctx, "string", NewStringExample)
-
-	if err != nil {
-		panic(err)
-	}
-}
-
-func TestRoster(t *testing.T) {
-
-	ctx := context.Background()
-
-	e, err := NewExample(ctx, "string:///helloworld")
-
-	if err != nil {
-		t.Fatalf("Failed to create new example, %v", err)
-	}
-
-	v := e.String()
-
-	if v != "/helloworld" {
-		t.Fatalf("Unexpected result: '%s'", v)
-	}
+func Schemes() []string {
+	return registry.Schemes(context.Background())
 }
 ```
+
+Implement the interface and register it (use `MustRegister` to panic on failure, for example in `init`):
+
+```
+package greeter
+
+import (
+	"context"
+	"net/url"
+)
+
+type PathGreeter string
+
+func (g PathGreeter) Greet() string {
+	return "Hello, " + string(g)
+}
+
+func init() {
+	registry.MustRegister(context.Background(), "path", NewPathGreeter)
+}
+
+func NewPathGreeter(ctx context.Context, uri string) (Greeter, error) {
+
+	u, err := url.Parse(uri)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return PathGreeter(u.Path), nil
+}
+```
+
+Create instances from URIs:
+
+```
+g, err := greeter.NewGreeter(ctx, "path:///world")
+fmt.Println(g.Greet())        // Hello, /world
+
+fmt.Println(greeter.Schemes()) // [path://]
+```
+
+`Registry[T]` handles URI parsing, scheme lookup, type checking and scheme listing. A working version is in [registry_test.go](registry_test.go).
+
+The lower-level `Roster` interface (see [roster_test.go](roster_test.go)) is still available.
+
+## Migrating from v1
+
+* Import `github.com/aaronland/go-roster/v2`. Requires Go 1.18+.
+* `Registry[T]` is new; the `Roster` and `DefaultRoster` APIs are unchanged.
 
 ## Concrete examples
 

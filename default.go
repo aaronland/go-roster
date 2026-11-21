@@ -36,8 +36,8 @@ func (dr *DefaultRoster) Driver(ctx context.Context, name string) (interface{}, 
 
 	nrml_name := dr.NormalizeName(ctx, name)
 
-	dr.mu.Lock()
-	defer dr.mu.Unlock()
+	dr.mu.RLock()
+	defer dr.mu.RUnlock()
 
 	i, ok := dr.drivers[nrml_name]
 
@@ -63,7 +63,7 @@ func (dr *DefaultRoster) Register(ctx context.Context, name string, i interface{
 	_, dup := dr.drivers[nrml_name]
 
 	if dup {
-		return fmt.Errorf("Register called twice for reader '%s'", name)
+		return fmt.Errorf("Register called twice for '%s'", name)
 	}
 
 	dr.drivers[nrml_name] = i
