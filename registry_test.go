@@ -2,80 +2,161 @@ package roster
 
 import (
 	"context"
-	"net/url"
+	"io"
+	"os"
 	"reflect"
+	"sync"
 	"testing"
 )
 
-type Greeter interface {
-	Greet() string
+// Writer is the example interface that implementations are registered for.
+type Writer interface {
+	Write(ctx context.Context, data []byte) error
 }
 
-type pathGreeter string
+// NullWriter discards everything written to it.
+type NullWriter struct{}
 
-func (g pathGreeter) Greet() string { return string(g) }
+func NewNullWriter(ctx context.Context, uri string) (Writer, error) {
+	return &NullWriter{}, nil
+}
 
-func newPathGreeter(ctx context.Context, uri string) (Greeter, error) {
+func (w *NullWriter) Write(ctx context.Context, data []byte) error {
+	_, err := io.Discard.Write(data)
+	return err
+}
 
-	u, err := url.Parse(uri)
+// StdoutWriter writes to os.Stdout.
+type StdoutWriter struct{}
 
-	if err != nil {
-		return nil, err
-	}
+func NewStdoutWriter(ctx context.Context, uri string) (Writer, error) {
+	return &StdoutWriter{}, nil
+}
 
-	return pathGreeter(u.Path), nil
+func (w *StdoutWriter) Write(ctx context.Context, data []byte) error {
+	_, err := os.Stdout.Write(data)
+	return err
+}
+
+func newTestRegistry(t *testing.T) *Registry[Writer] {
+
+	t.Helper()
+
+	ctx := context.Background()
+	r := NewRegistry[Writer]()
+
+	r.MustRegister(ctx, "null", NewNullWriter)
+	r.MustRegister(ctx, "stdout", NewStdoutWriter)
+
+	return r
 }
 
 func TestRegistry(t *testing.T) {
 
 	ctx := context.Background()
+	r := newTestRegistry(t)
 
-	r, err := NewRegistry[Greeter]()
-
-	if err != nil {
-		t.Fatalf("Failed to create registry, %v", err)
-	}
-
-	err = r.Register(ctx, "Path", newPathGreeter)
+	w, err := r.New(ctx, "null://")
 
 	if err != nil {
-		t.Fatalf("Failed to register, %v", err)
+		t.Fatalf("Failed to create null writer, %v", err)
 	}
 
-	if r.Register(ctx, "path", newPathGreeter) == nil {
-		t.Fatal("Expected duplicate registration to fail")
+	if _, ok := w.(*NullWriter); !ok {
+		t.Fatalf("Expected *NullWriter, got %T", w)
 	}
 
-	g, err := r.New(ctx, "path:///hello")
+	if err := w.Write(ctx, []byte("hello")); err != nil {
+		t.Fatalf("Failed to write, %v", err)
+	}
+
+	// Schemes are case-insensitive
+	w, err = r.New(ctx, "stdout://")
 
 	if err != nil {
-		t.Fatalf("Failed to create greeter, %v", err)
+		t.Fatalf("Failed to create stdout writer, %v", err)
 	}
 
-	if g.Greet() != "/hello" {
-		t.Fatalf("Unexpected result: '%s'", g.Greet())
+	if _, ok := w.(*StdoutWriter); !ok {
+		t.Fatalf("Expected *StdoutWriter, got %T", w)
 	}
 
-	_, err = r.New(ctx, "nope://")
-
-	if err == nil {
+	if _, err = r.New(ctx, "nope://"); err == nil {
 		t.Fatal("Expected unknown scheme to fail")
 	}
 
-	expected := []string{"path://"}
+	if _, err = r.New(ctx, "://bad"); err == nil {
+		t.Fatal("Expected unparseable URI to fail")
+	}
+
+	expected := []string{"null://", "stdout://"}
 
 	if !reflect.DeepEqual(r.Schemes(ctx), expected) {
 		t.Fatalf("Unexpected schemes: %v", r.Schemes(ctx))
 	}
 }
 
+func TestStdoutWriter(t *testing.T) {
+
+	ctx := context.Background()
+	r := newTestRegistry(t)
+
+	w, err := r.New(ctx, "stdout://")
+
+	if err != nil {
+		t.Fatalf("Failed to create stdout writer, %v", err)
+	}
+
+	// Redirect os.Stdout to a pipe to capture what the writer emits.
+	pr, pw, err := os.Pipe()
+
+	if err != nil {
+		t.Fatalf("Failed to create pipe, %v", err)
+	}
+
+	orig := os.Stdout
+	os.Stdout = pw
+
+	defer func() { os.Stdout = orig }()
+
+	err = w.Write(ctx, []byte("hello"))
+
+	os.Stdout = orig
+	pw.Close()
+
+	if err != nil {
+		t.Fatalf("Failed to write, %v", err)
+	}
+
+	body, err := io.ReadAll(pr)
+
+	if err != nil {
+		t.Fatalf("Failed to read pipe, %v", err)
+	}
+
+	if string(body) != "hello" {
+		t.Fatalf("Unexpected output: '%s'", string(body))
+	}
+}
+
+func TestRegistryRegister(t *testing.T) {
+
+	ctx := context.Background()
+	r := newTestRegistry(t)
+
+	if r.Register(ctx, "NULL", NewNullWriter) == nil {
+		t.Fatal("Expected duplicate registration to fail")
+	}
+
+	if r.Register(ctx, "nil", nil) == nil {
+		t.Fatal("Expected nil factory to fail")
+	}
+}
+
 func TestRegistryMustRegister(t *testing.T) {
 
 	ctx := context.Background()
-
-	r, _ := NewRegistry[Greeter]()
-
-	r.MustRegister(ctx, "path", newPathGreeter)
+	r := newTestRegistry(t)
 
 	defer func() {
 		if recover() == nil {
@@ -83,19 +164,24 @@ func TestRegistryMustRegister(t *testing.T) {
 		}
 	}()
 
-	r.MustRegister(ctx, "path", newPathGreeter)
+	r.MustRegister(ctx, "null", NewNullWriter)
 }
 
-func TestRegistryWrongType(t *testing.T) {
+func TestRegistryConcurrent(t *testing.T) {
 
 	ctx := context.Background()
+	r := newTestRegistry(t)
 
-	r, _ := NewRegistry[Greeter]()
+	var wg sync.WaitGroup
 
-	// Bypass the typed API to confirm a bad registration returns an error rather than panicking.
-	_ = r.roster.Register(ctx, "bad", "not a factory")
-
-	if _, err := r.New(ctx, "bad://"); err == nil {
-		t.Fatal("Expected error for invalid registration type")
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = r.New(ctx, "null://")
+			_ = r.Schemes(ctx)
+		}()
 	}
+
+	wg.Wait()
 }

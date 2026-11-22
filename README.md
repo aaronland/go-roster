@@ -1,17 +1,17 @@
 # go-roster
 
-Go package provides interfaces and methods for defining internal lookup tables (or "rosters") for registering and instantiatinge custom interfaces with multiple implementations.
+A small Go package for building "plug-in" style registries.
 
 ## Documentation
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/aaronland/go-roster/v2.svg)](https://pkg.go.dev/github.com/aaronland/go-roster/v2)
 
-## Example (v2, generics)
+## Example
 
-Define an interface and a registry for it. This is the only boilerplate a consuming package needs:
+Step 1: define the interface and a registry for it. This is the only boilerplate a consuming package needs. Think of the registry as a front desk: it remembers which implementation handles which URI scheme (the part before `://`) and routes each request to the right one.
 
 ```
-package greeter
+package writer
 
 import (
 	"context"
@@ -19,79 +19,94 @@ import (
 	"github.com/aaronland/go-roster/v2"
 )
 
-type Greeter interface {
-	Greet() string
+// The "what": anything that can accept some bytes. Callers only ever deal with this interface.
+type Writer interface {
+	Write(ctx context.Context, data []byte) error
 }
 
-var registry, _ = roster.NewRegistry[Greeter]()
+// The front desk. One registry per interface; it only hands back values of type Writer.
+var registry = roster.NewRegistry[Writer]()
 
-// GreeterInitializationFunc is an alias, so implementations can use either name.
-type GreeterInitializationFunc = roster.Factory[Greeter]
+// A "factory": a recipe that takes a URI and builds a ready-to-use Writer.
+// This is just a friendlier name for roster.Factory[Writer].
+type WriterInitializationFunc = roster.Factory[Writer]
 
-func RegisterGreeter(ctx context.Context, scheme string, f GreeterInitializationFunc) error {
+// Lets implementations sign up: "for this scheme, use this factory".
+func RegisterWriter(ctx context.Context, scheme string, f WriterInitializationFunc) error {
 	return registry.Register(ctx, scheme, f)
 }
 
-func NewGreeter(ctx context.Context, uri string) (Greeter, error) {
+// Lets callers place an order: pass a URI, get back a Writer.
+// The registry reads the scheme, finds the matching factory and runs it.
+func NewWriter(ctx context.Context, uri string) (Writer, error) {
 	return registry.New(ctx, uri)
 }
 
+// Lists every scheme that has signed up, e.g. for help text or error messages.
 func Schemes() []string {
 	return registry.Schemes(context.Background())
 }
 ```
 
-Implement the interface and register it (use `MustRegister` to panic on failure, for example in `init`):
+Step 2: Write the implementations and sign each one up under a scheme.
 
 ```
-package greeter
+package writer
 
 import (
 	"context"
-	"net/url"
+	"io"
+	"os"
 )
 
-type PathGreeter string
+// NullWriter throws everything away.
+type NullWriter struct{}
 
-func (g PathGreeter) Greet() string {
-	return "Hello, " + string(g)
+func NewNullWriter(ctx context.Context, uri string) (Writer, error) {
+	return &NullWriter{}, nil
 }
 
+func (w *NullWriter) Write(ctx context.Context, data []byte) error {
+	_, err := io.Discard.Write(data)
+	return err
+}
+
+// StdoutWriter prints everything to the terminal (standard output).
+type StdoutWriter struct{}
+
+func NewStdoutWriter(ctx context.Context, uri string) (Writer, error) {
+	return &StdoutWriter{}, nil
+}
+
+func (w *StdoutWriter) Write(ctx context.Context, data []byte) error {
+	_, err := os.Stdout.Write(data)
+	return err
+}
+
+// init runs automatically when the package loads, so the implementations are ready before anyone asks for one.
 func init() {
-	registry.MustRegister(context.Background(), "path", NewPathGreeter)
-}
-
-func NewPathGreeter(ctx context.Context, uri string) (Greeter, error) {
-
-	u, err := url.Parse(uri)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return PathGreeter(u.Path), nil
+	ctx := context.Background()
+	registry.MustRegister(ctx, "null", NewNullWriter)
+	registry.MustRegister(ctx, "stdout", NewStdoutWriter)
 }
 ```
 
-Create instances from URIs:
+Step 3: Callers pass a URI and never need to know which implementations exist or where they live, so new ones can be added without changing this code.
 
 ```
-g, err := greeter.NewGreeter(ctx, "path:///world")
-fmt.Println(g.Greet())        // Hello, /world
+// "stdout" is the scheme, so the registry picks StdoutWriter.
+// Using "null://" instead would pick NullWriter with no other code changes.
+w, err := writer.NewWriter(ctx, "stdout://")
 
-fmt.Println(greeter.Schemes()) // [path://]
+if err != nil {
+	log.Fatal(err)
+}
+
+// Write through the interface; the caller does not know or care which writer this is.
+w.Write(ctx, []byte("hello world\n")) // prints: hello world
+
+// Ask what is available.
+fmt.Println(writer.Schemes()) // [null:// stdout://]
 ```
 
-`Registry[T]` handles URI parsing, scheme lookup, type checking and scheme listing. A working version is in [registry_test.go](registry_test.go).
-
-The lower-level `Roster` interface (see [roster_test.go](roster_test.go)) is still available.
-
-## Migrating from v1
-
-* Import `github.com/aaronland/go-roster/v2`. Requires Go 1.18+.
-* `Registry[T]` is new; the `Roster` and `DefaultRoster` APIs are unchanged.
-
-## Concrete examples
-
-* https://github.com/whosonfirst/go-reader
-* https://github.com/whosonfirst/go-writer
+`Registry[T]` handles URI parsing, scheme lookup and scheme listing. A working version is in [registry_test.go](registry_test.go).
