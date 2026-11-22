@@ -1,3 +1,3 @@
-module github.com/aaronland/go-roster
+module github.com/aaronland/go-roster/v2
 
-go 1.16
+go 1.18

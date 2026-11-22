@@ -1,129 +1,112 @@
 # go-roster
 
-Go package provides interfaces and methods for defining internal lookup tables (or "rosters") for registering and instantiatinge custom interfaces with multiple implementations.
+A small Go package for building "plug-in" style registries.
 
 ## Documentation
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/aaronland/go-roster.svg)](https://pkg.go.dev/github.com/aaronland/go-roster)
+[![Go Reference](https://pkg.go.dev/badge/github.com/aaronland/go-roster/v2.svg)](https://pkg.go.dev/github.com/aaronland/go-roster/v2)
 
 ## Example
 
-The following example is the body of the [roster_test.go](roster_test.go) file:
+Step 1: define the interface and a registry for it. This is the only boilerplate a consuming package needs. Think of the registry as a front desk: it remembers which implementation handles which URI scheme (the part before `://`) and routes each request to the right one.
 
 ```
-package roster
+package writer
 
 import (
 	"context"
-	"fmt"
-	"net/url"
-	"testing"
+
+	"github.com/aaronland/go-roster/v2"
 )
 
-// Create a toy interface that might have multiple implementations including a common
-// method signature for creating instantiations of that interface.
-
-type Example interface {
-	String() string
+// The "what": anything that can accept some bytes. Callers only ever deal with this interface.
+type Writer interface {
+	Write(ctx context.Context, data []byte) error
 }
 
-type ExampleInitializationFunc func(context.Context, string) (Example, error)
+// The front desk. One registry per interface; it only hands back values of type Writer.
+var registry = roster.NewRegistry[Writer]()
 
-func RegisterExample(ctx context.Context, scheme string, init_func ExampleInitializationFunc) error {
-	return example_roster.Register(ctx, scheme, init_func)
+// A "factory": a recipe that takes a URI and builds a ready-to-use Writer.
+// This is just a friendlier name for roster.Factory[Writer].
+type WriterInitializationFunc = roster.Factory[Writer]
+
+// Lets implementations sign up: "for this scheme, use this factory".
+func RegisterWriter(ctx context.Context, scheme string, f WriterInitializationFunc) error {
+	return registry.Register(ctx, scheme, f)
 }
 
-func NewExample(ctx context.Context, uri string) (Example, error) {
-
-	u, err := url.Parse(uri)
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse URI, %w", err)
-	}
-
-	scheme := u.Scheme
-
-	i, err := example_roster.Driver(ctx, scheme)
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to find registeration for %s, %w", scheme, err)
-	}
-
-	init_func := i.(ExampleInitializationFunc)
-	return init_func(ctx, uri)
+// Lets callers place an order: pass a URI, get back a Writer.
+// The registry reads the scheme, finds the matching factory and runs it.
+func NewWriter(ctx context.Context, uri string) (Writer, error) {
+	return registry.New(ctx, uri)
 }
 
-// Something that implements the Example interface
-
-type StringExample struct {
-	Example
-	value string
-}
-
-func NewStringExample(ctx context.Context, uri string) (Example, error) {
-
-	u, err := url.Parse(uri)
-
-	if err != nil {
-		return nil, fmt.Errorf("Failed to parse URL, %w", err)
-	}
-
-	s := &StringExample{
-		value: u.Path,
-	}
-
-	return s, nil
-}
-
-func (e *StringExample) String() string {
-	return e.value
-}
-
-// Create a global "roster" of implementations of the Example interface
-
-var example_roster Roster
-
-// Ensure that there is a valid roster (for use by the code handling the Example interface)
-// and register the StringExample implementation
-
-func init() {
-
-	ctx := context.Background()
-
-	r, err := NewDefaultRoster()
-
-	if err != nil {
-		panic(err)
-	}
-
-	example_roster = r
-
-	err = RegisterExample(ctx, "string", NewStringExample)
-
-	if err != nil {
-		panic(err)
-	}
-}
-
-func TestRoster(t *testing.T) {
-
-	ctx := context.Background()
-
-	e, err := NewExample(ctx, "string:///helloworld")
-
-	if err != nil {
-		t.Fatalf("Failed to create new example, %v", err)
-	}
-
-	v := e.String()
-
-	if v != "/helloworld" {
-		t.Fatalf("Unexpected result: '%s'", v)
-	}
+// Lists every scheme that has signed up, e.g. for help text or error messages.
+func Schemes() []string {
+	return registry.Schemes(context.Background())
 }
 ```
 
-## Concrete examples
+Step 2: Write the implementations and sign each one up under a scheme.
 
-* https://github.com/whosonfirst/go-reader
-* https://github.com/whosonfirst/go-writer
+```
+package writer
+
+import (
+	"context"
+	"io"
+	"os"
+)
+
+// NullWriter throws everything away.
+type NullWriter struct{}
+
+func NewNullWriter(ctx context.Context, uri string) (Writer, error) {
+	return &NullWriter{}, nil
+}
+
+func (w *NullWriter) Write(ctx context.Context, data []byte) error {
+	_, err := io.Discard.Write(data)
+	return err
+}
+
+// StdoutWriter prints everything to the terminal (standard output).
+type StdoutWriter struct{}
+
+func NewStdoutWriter(ctx context.Context, uri string) (Writer, error) {
+	return &StdoutWriter{}, nil
+}
+
+func (w *StdoutWriter) Write(ctx context.Context, data []byte) error {
+	_, err := os.Stdout.Write(data)
+	return err
+}
+
+// init runs automatically when the package loads, so the implementations are ready before anyone asks for one.
+func init() {
+	ctx := context.Background()
+	registry.MustRegister(ctx, "null", NewNullWriter)
+	registry.MustRegister(ctx, "stdout", NewStdoutWriter)
+}
+```
+
+Step 3: Callers pass a URI and never need to know which implementations exist or where they live, so new ones can be added without changing this code.
+
+```
+// "stdout" is the scheme, so the registry picks StdoutWriter.
+// Using "null://" instead would pick NullWriter with no other code changes.
+w, err := writer.NewWriter(ctx, "stdout://")
+
+if err != nil {
+	log.Fatal(err)
+}
+
+// Write through the interface; the caller does not know or care which writer this is.
+w.Write(ctx, []byte("hello world\n")) // prints: hello world
+
+// Ask what is available.
+fmt.Println(writer.Schemes()) // [null:// stdout://]
+```
+
+`Registry[T]` handles URI parsing, scheme lookup and scheme listing. A working version is in [registry_test.go](registry_test.go).
